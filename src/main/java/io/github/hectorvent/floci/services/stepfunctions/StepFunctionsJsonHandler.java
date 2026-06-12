@@ -222,7 +222,11 @@ public class StepFunctionsJsonHandler {
             item.put("type", e.getType());
             if (e.getPreviousEventId() != null) item.put("previousEventId", e.getPreviousEventId());
             if (e.getDetails() != null) {
-                item.set(e.getType() + "EventDetails", objectMapper.valueToTree(e.getDetails()));
+                // Hotfix AWS SDK compatibility
+                String type = e.getType();
+                String typeLowerFirst = Character.toLowerCase(type.charAt(0)) + type.substring(1);
+
+                item.set(typeLowerFirst + "EventDetails", objectMapper.valueToTree(e.getDetails()));
             }
         }
         return Response.ok(response).build();

@@ -38,6 +38,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+
 @ApplicationScoped
 public class AslExecutor {
 
@@ -238,30 +246,46 @@ public class AslExecutor {
 
         JsonNode taskResult;
         if (jsonata) {
+            // TODO Remove
+            LOG.info("Invoking Jsonnata step "+ stateName);
             JsonNode effectiveInput = input;
             if (stateDef.has("Arguments")) {
                 JsonNode statesVar = buildStatesVar(input, null, context);
                 effectiveInput = jsonataEvaluator.resolveTemplate(stateDef.get("Arguments"), statesVar);
             }
             taskResult = invokeResource(effectiveResource, effectiveInput, sm, taskToken);
+            // TODO Remove
+            LOG.info("result: "+ taskResult.asText());
         } else {
+            // TODO Remove
+            LOG.info("Invoking non-Jsonnata step"+ stateName);
             JsonNode effectiveInput = applyInputPath(stateDef, input);
             if (stateDef.has("Parameters")) {
                 effectiveInput = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
             }
             taskResult = invokeResource(effectiveResource, effectiveInput, sm, taskToken);
+            // TODO Remove
+            LOG.info("result: "+ taskResult.toString());
         }
 
         if (tokenFuture != null) {
             taskResult = awaitToken(tokenFuture, stateDef);
+            // TODO Remove
+            LOG.info("result: "+ taskResult.toString());
         }
 
         if (jsonata) {
             JsonNode output = applyJsonataOutput(stateDef, input, taskResult, context);
+            // TODO Remove
+            LOG.info("state result output: "+ output.toString());
             return new StateResult(output, stateDef.path("Next").asText(null));
         } else {
             JsonNode output = mergeResult(stateDef, input, taskResult);
+            // TODO Remove
+            LOG.info("state result output: "+ output.toString());
             output = applyOutputPath(stateDef, input, output);
+            // TODO Remove
+            LOG.info("state result output normalized: "+ output.toString());
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
     }
@@ -357,6 +381,19 @@ public class AslExecutor {
         if (resource.equals("arn:aws:states:::aws-sdk:sqs:sendMessage")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeAwsSdkSqsSendMessage(input, region);
+        }
+
+        // HTTP optimized integration
+        if (resource.equals("arn:aws:states:::http:invoke")) {
+            return invokeHttp(input);
+        }
+
+//        Cloudwatch
+//        "Resource": "arn:aws:states:::aws-sdk:cloudwatch:putMetricData"
+        // TODO Implement properly
+        if (resource.startsWith("arn:aws:states:::aws-sdk:cloudwatch")) {
+            ObjectNode result = objectMapper.createObjectNode();
+            return result;
         }
 
         // Nested state machine integration
@@ -632,6 +669,175 @@ public class AslExecutor {
             return jsonNode;
         }
         return objectMapper.createObjectNode();
+    }
+
+    // TODO Use Vertx HTTP client
+    private JsonNode invokeHttp(JsonNode input) {
+        String uri = input.path("ApiEndpoint").asText(null);
+        if (uri == null || uri.isBlank()) {
+            throw new FailStateException("States.TaskFailed", "ApiEndpoint is required for HTTP task");
+        }
+
+        String method = input.path("Method").asText("GET").toUpperCase();
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+            .uri(URI.create(uri))
+            .timeout(Duration.ofSeconds(input.path("TimeoutSeconds").asLong(60)));
+
+        JsonNode headers = input.path("Headers");
+        if (headers.isObject()) {
+            headers.fields().forEachRemaining(entry -> {
+                JsonNode value = entry.getValue();
+                if (value.isArray()) {
+                    value.forEach(headerValue -> requestBuilder.header(entry.getKey(), headerValue.asText()));
+                } else if (!value.isNull()) {
+                    requestBuilder.header(entry.getKey(), value.asText());
+                }
+            });
+        }
+
+        JsonNode requestBody = input.path("RequestBody");
+        HttpRequest.BodyPublisher bodyPublisher = HttpRequest.BodyPublishers.noBody();
+
+        if (!requestBody.isMissingNode() && !requestBody.isNull() && allowsRequestBody(method)) {
+            String contentType = headerValue(headers, "Content-Type");
+            boolean urlEncoded = "URL_ENCODED".equalsIgnoreCase(
+                input.path("Transform").path("RequestBodyEncoding").asText());
+
+            if (urlEncoded || "application/x-www-form-urlencoded".equalsIgnoreCase(contentType)) {
+                bodyPublisher = HttpRequest.BodyPublishers.ofString(toUrlEncodedForm(
+                    requestBody,
+                    input.path("Transform").path("RequestEncodingOptions").path("ArrayFormat").asText("INDICES")
+                ));
+                if (contentType == null || contentType.isBlank()) {
+                    requestBuilder.header("Content-Type", "application/x-www-form-urlencoded");
+                }
+            } else if (requestBody.isTextual()) {
+                bodyPublisher = HttpRequest.BodyPublishers.ofString(requestBody.asText());
+            } else {
+                try {
+                    bodyPublisher = HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(requestBody));
+                } catch (Exception e) {
+                    throw new FailStateException("States.TaskFailed", "Failed to serialize HTTP request body: " + e.getMessage());
+                }
+                if (contentType == null || contentType.isBlank()) {
+                    requestBuilder.header("Content-Type", "application/json");
+                }
+            }
+        }
+
+        requestBuilder.method(method, bodyPublisher);
+
+        try {
+            LOG.infov("Step Functions HTTP task sending request: method={0}, uri={1}", method, uri);
+            HttpResponse<String> response = HttpClient.newHttpClient()
+                .send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
+
+            int statusCode = response.statusCode();
+            if (statusCode < 200 || statusCode >= 300) {
+                throw new FailStateException("States.Http.StatusCode." + statusCode, response.body());
+            }
+
+            ObjectNode result = objectMapper.createObjectNode();
+            result.put("StatusCode", statusCode);
+
+            ObjectNode responseHeaders = objectMapper.createObjectNode();
+            response.headers().map().forEach((name, values) -> {
+                ArrayNode headerValues = objectMapper.createArrayNode();
+                values.forEach(headerValues::add);
+                responseHeaders.set(name, headerValues);
+            });
+            result.set("Headers", responseHeaders);
+
+            String body = response.body();
+            if (body == null || body.isBlank()) {
+                result.set("ResponseBody", NullNode.getInstance());
+            } else {
+                String responseContentType = response.headers()
+                    .firstValue("Content-Type")
+                    .orElse("");
+                if (responseContentType.toLowerCase().contains("application/json")) {
+                    try {
+                        result.set("ResponseBody", objectMapper.readTree(body));
+                    } catch (Exception ignored) {
+                        result.put("ResponseBody", body);
+                    }
+                } else {
+                    result.put("ResponseBody", body);
+                }
+            }
+
+            LOG.info("HTTP Response received!!");
+//            LOG.infov("Step Functions HTTP task received response: method={0}, uri={1}, statusCode={2}, responseBytes={3}",
+//                method, uri, statusCode, result.toString());
+            return result;
+        } catch (FailStateException e) {
+            throw e;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new FailStateException("States.TaskFailed", "HTTP request interrupted");
+        } catch (Exception e) {
+            throw new FailStateException("States.TaskFailed",
+                e.getMessage() != null ? e.getMessage() : "HTTP request failed");
+        }
+    }
+
+    private boolean allowsRequestBody(String method) {
+        return !"GET".equals(method) && !"HEAD".equals(method);
+    }
+
+    private String headerValue(JsonNode headers, String name) {
+        if (!headers.isObject()) {
+            return null;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = headers.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            if (entry.getKey().equalsIgnoreCase(name)) {
+                return entry.getValue().isArray() && !entry.getValue().isEmpty()
+                    ? entry.getValue().get(0).asText()
+                    : entry.getValue().asText();
+            }
+        }
+        return null;
+    }
+
+    private String toUrlEncodedForm(JsonNode node, String arrayFormat) {
+        List<String> params = new ArrayList<>();
+        appendUrlEncodedParams(params, "", node, arrayFormat);
+        return String.join("&", params);
+    }
+
+    private void appendUrlEncodedParams(List<String> params, String prefix, JsonNode node, String arrayFormat) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return;
+        }
+
+        if (node.isObject()) {
+            node.fields().forEachRemaining(entry -> {
+                String key = prefix.isBlank() ? entry.getKey() : prefix + "[" + entry.getKey() + "]";
+                appendUrlEncodedParams(params, key, entry.getValue(), arrayFormat);
+            });
+            return;
+        }
+
+        if (node.isArray()) {
+            for (int i = 0; i < node.size(); i++) {
+                String key = switch (arrayFormat.toUpperCase()) {
+                    case "BRACKETS" -> prefix + "[]";
+                    case "REPEAT" -> prefix;
+                    default -> prefix + "[" + i + "]";
+                };
+                appendUrlEncodedParams(params, key, node.get(i), arrayFormat);
+            }
+            return;
+        }
+
+        params.add(urlEncode(prefix) + "=" + urlEncode(node.asText()));
+    }
+
+    private String urlEncode(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
     private String normalizeSqsErrorCode(String errorCode, boolean awsSdkStyleErrors) {
