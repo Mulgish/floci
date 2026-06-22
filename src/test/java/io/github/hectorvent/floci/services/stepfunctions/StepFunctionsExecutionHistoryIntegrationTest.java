@@ -11,6 +11,7 @@ import java.time.Duration;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -70,6 +71,44 @@ class StepFunctionsExecutionHistoryIntegrationTest {
                 .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails", notNullValue())
                 .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails.output",
                         equalTo("{\"ExecutionWaitTimeInSeconds\":3}"));
+    }
+
+    @Test
+    void getExecutionHistory_omitsExecutionSucceededEventDetailsWhenIncludeExecutionDataIsFalse() throws Exception {
+        String definition = """
+                {
+                  "StartAt": "Set Output",
+                  "States": {
+                    "Set Output": {
+                      "Type": "Pass",
+                      "End": true,
+                      "Result": {
+                        "message": "hidden"
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String stateMachineArn = createStateMachine("execution-history-no-data-test", definition);
+        String executionArn = startExecution(stateMachineArn);
+        waitForExecution(executionArn);
+
+        given()
+                .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {
+                            "executionArn": "%s",
+                            "includeExecutionData": false
+                        }
+                        """, executionArn))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("events.find { it.type == 'ExecutionSucceeded' }.type", equalTo("ExecutionSucceeded"))
+                .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails", nullValue());
     }
 
     private String createStateMachine(String name, String definition) {
