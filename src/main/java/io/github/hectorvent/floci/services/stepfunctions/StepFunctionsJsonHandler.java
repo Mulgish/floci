@@ -225,13 +225,20 @@ public class StepFunctionsJsonHandler {
             item.put("type", e.getType());
             if (e.getPreviousEventId() != null) item.put("previousEventId", e.getPreviousEventId());
             if (includeExecutionData && e.getDetails() != null) {
-                // Ensure SDK can read execution details by camelCasing json field
-                String type = e.getType();
-                String typeLowerFirst = Character.toLowerCase(type.charAt(0)) + type.substring(1);
-                item.set(typeLowerFirst + "EventDetails", objectMapper.valueToTree(e.getDetails()));
+                item.set(historyEventDetailsField(e.getType()), objectMapper.valueToTree(e.getDetails()));
             }
         }
         return Response.ok(response).build();
+    }
+
+    static String historyEventDetailsField(String type) {
+        if (type.endsWith("StateEntered")) {
+            return "stateEnteredEventDetails";
+        }
+        if (type.endsWith("StateExited")) {
+            return "stateExitedEventDetails";
+        }
+        return Character.toLowerCase(type.charAt(0)) + type.substring(1) + "EventDetails";
     }
 
     private Response handleSendTaskSuccess(JsonNode request) {

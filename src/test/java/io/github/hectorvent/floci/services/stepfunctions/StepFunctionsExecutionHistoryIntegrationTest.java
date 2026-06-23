@@ -67,6 +67,16 @@ class StepFunctionsExecutionHistoryIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(200)
+                .body("events.find { it.type == 'PassStateEntered' }.type", equalTo("PassStateEntered"))
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails", notNullValue())
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails.name",
+                        equalTo("Set Variables and State Output"))
+                .body("events.find { it.type == 'PassStateEntered' }.passStateEnteredEventDetails", nullValue())
+                .body("events.find { it.type == 'PassStateExited' }.type", equalTo("PassStateExited"))
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails", notNullValue())
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails.name",
+                        equalTo("Set Variables and State Output"))
+                .body("events.find { it.type == 'PassStateExited' }.passStateExitedEventDetails", nullValue())
                 .body("events.find { it.type == 'ExecutionSucceeded' }.type", equalTo("ExecutionSucceeded"))
                 .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails", notNullValue())
                 .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails.output",
@@ -107,6 +117,8 @@ class StepFunctionsExecutionHistoryIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(200)
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails", nullValue())
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails", nullValue())
                 .body("events.find { it.type == 'ExecutionSucceeded' }.type", equalTo("ExecutionSucceeded"))
                 .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails", nullValue());
     }
